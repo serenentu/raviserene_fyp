@@ -1,7 +1,6 @@
 package com.raviserene.fyp.data
 
 import com.google.firebase.auth.FirebaseAuth
-import com.google.firebase.auth.AuthCredential
 import com.google.firebase.auth.GoogleAuthProvider
 import com.google.firebase.firestore.FirebaseFirestore
 import kotlinx.coroutines.tasks.await
@@ -10,7 +9,7 @@ data class UserProfile(
     val uid: String = "",
     val displayName: String = "",
     val email: String = "",
-    val role: String = "rider", // or "driver"
+    val role: String = "rider",
     val preferences: Map<String, Any> = emptyMap()
 )
 
@@ -22,8 +21,8 @@ class AuthRepository(
 
     suspend fun signUpWithEmail(email: String, password: String, profile: UserProfile): Result<String> {
         return try {
-            val result = auth.createUserWithEmailAndPassword(email, password).await()
-            val uid = result.user?.uid ?: throw Exception("No UID")
+            val task = auth.createUserWithEmailAndPassword(email, password).await()
+            val uid = task.user?.uid ?: throw Exception("No UID returned")
             val profileToSave = profile.copy(uid = uid, email = email)
             store.collection("users").document(uid).set(profileToSave).await()
             Result.success(uid)
@@ -34,8 +33,8 @@ class AuthRepository(
 
     suspend fun signInWithEmail(email: String, password: String): Result<String> {
         return try {
-            val result = auth.signInWithEmailAndPassword(email, password).await()
-            val uid = result.user?.uid ?: throw Exception("No UID")
+            val task = auth.signInWithEmailAndPassword(email, password).await()
+            val uid = task.user?.uid ?: throw Exception("No UID returned")
             Result.success(uid)
         } catch (e: Exception) {
             Result.failure(e)
@@ -43,27 +42,31 @@ class AuthRepository(
     }
 
     fun signInWithGoogle(idToken: String, onComplete: (Result<String>) -> Unit) {
-        val credential: AuthCredential = GoogleAuthProvider.getCredential(idToken, null)
+        val credential = GoogleAuthProvider.getCredential(idToken, null)
         auth.signInWithCredential(credential)
             .addOnCompleteListener { task ->
                 if (task.isSuccessful) {
                     val uid = auth.currentUser?.uid
-                    if (uid != null) {
-                        // ensure user doc exists
-                        val ref = store.collection("users").document(uid)
-                        ref.get().addOnSuccessListener { doc ->
-                            if (!doc.exists()) {
-                                val profile = UserProfile(
-                                    uid = uid,
-                                    displayName = auth.currentUser?.displayName ?: "",
-                                    email = auth.currentUser?.email ?: "",
-                                    role = "rider"
-                                )
-                                ref.set(profile)
-                            }
+                    if (uid == null) {
+                        onComplete(Result.failure(Exception("No UID after Google sign-in")))
+                        return@addOnCompleteListener
+                    }
+                    val ref = store.collection("users").document(uid)
+                    ref.get().addOnSuccessListener { doc ->
+                        if (!doc.exists()) {
+                            val profile = UserProfile(
+                                uid = uid,
+                                displayName = auth.currentUser?.displayName ?: "",
+                                email = auth.currentUser?.email ?: "",
+                                role = "rider"
+                            )
+                            ref.set(profile).addOnSuccessListener {
+                                onComplete(Result.success(uid))
+                            }.addOnFailureListener { e -> onComplete(Result.failure(e)) }
+                        } else {
                             onComplete(Result.success(uid))
-                        }.addOnFailureListener { e -> onComplete(Result.failure(e)) }
-                    } else onComplete(Result.failure(Exception("No UID after Google sign-in")))
+                        }
+                    }.addOnFailureListener { e -> onComplete(Result.failure(e)) }
                 } else {
                     onComplete(Result.failure(task.exception ?: Exception("Google sign-in failed")))
                 }
